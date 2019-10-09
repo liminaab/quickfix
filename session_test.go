@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quickfixgo/quickfix/enum"
 	"github.com/quickfixgo/quickfix/internal"
 
 	"github.com/stretchr/testify/require"
@@ -63,6 +62,37 @@ func (s *SessionSuite) TestFillDefaultHeader() {
 	s.FieldEquals(tagSenderCompID, "SND", msg.Header)
 	s.FieldEquals(tagSenderSubID, "SNDS", msg.Header)
 	s.FieldEquals(tagSenderLocationID, "SNDL", msg.Header)
+}
+
+func (s *SessionSuite) TestInsertSendingTime() {
+	var tests = []struct {
+		BeginString       string
+		Precision         TimestampPrecision
+		ExpectedPrecision TimestampPrecision
+	}{
+		{BeginStringFIX40, Millis, Seconds}, //config is ignored for fix < 4.2
+		{BeginStringFIX41, Millis, Seconds},
+
+		{BeginStringFIX42, Millis, Millis},
+		{BeginStringFIX42, Micros, Micros},
+		{BeginStringFIX42, Nanos, Nanos},
+
+		{BeginStringFIX43, Nanos, Nanos},
+		{BeginStringFIX44, Nanos, Nanos},
+		{BeginStringFIXT11, Nanos, Nanos},
+	}
+
+	for _, test := range tests {
+		s.session.sessionID.BeginString = test.BeginString
+		s.timestampPrecision = test.Precision
+
+		msg := NewMessage()
+		s.session.insertSendingTime(msg)
+
+		var f FIXUTCTimestamp
+		s.Nil(msg.Header.GetField(tagSendingTime, &f))
+		s.Equal(f.Precision, test.ExpectedPrecision)
+	}
 }
 
 func (s *SessionSuite) TestCheckCorrectCompID() {
@@ -146,6 +176,7 @@ func (s *SessionSuite) TestCheckTargetTooHigh() {
 }
 
 func (s *SessionSuite) TestCheckSendingTime() {
+	s.session.MaxLatency = time.Duration(120) * time.Second
 	msg := NewMessage()
 
 	err := s.session.checkSendingTime(msg)
@@ -195,6 +226,61 @@ func (s *SessionSuite) TestCheckTargetTooLow() {
 	//spot on
 	msg.Header.SetField(tagMsgSeqNum, FIXInt(45))
 	s.Nil(s.session.checkTargetTooLow(msg))
+}
+
+func (s *SessionSuite) TestShouldSendReset() {
+	var tests = []struct {
+		BeginString         string
+		ResetOnLogon        bool
+		ResetOnDisconnect   bool
+		ResetOnLogout       bool
+		NextSenderMsgSeqNum int
+		NextTargetMsgSeqNum int
+		Expected            bool
+	}{
+		{BeginStringFIX40, true, false, false, 1, 1, false}, //ResetSeqNumFlag not available < fix41
+
+		{BeginStringFIX41, true, false, false, 1, 1, true}, //session must be configured to reset on logon
+		{BeginStringFIX42, true, false, false, 1, 1, true},
+		{BeginStringFIX43, true, false, false, 1, 1, true},
+		{BeginStringFIX44, true, false, false, 1, 1, true},
+		{BeginStringFIXT11, true, false, false, 1, 1, true},
+
+		{BeginStringFIX41, false, true, false, 1, 1, true}, //or disconnect
+		{BeginStringFIX42, false, true, false, 1, 1, true},
+		{BeginStringFIX43, false, true, false, 1, 1, true},
+		{BeginStringFIX44, false, true, false, 1, 1, true},
+		{BeginStringFIXT11, false, true, false, 1, 1, true},
+
+		{BeginStringFIX41, false, false, true, 1, 1, true}, //or logout
+		{BeginStringFIX42, false, false, true, 1, 1, true},
+		{BeginStringFIX43, false, false, true, 1, 1, true},
+		{BeginStringFIX44, false, false, true, 1, 1, true},
+		{BeginStringFIXT11, false, false, true, 1, 1, true},
+
+		{BeginStringFIX41, true, true, false, 1, 1, true}, //or combo
+		{BeginStringFIX42, false, true, true, 1, 1, true},
+		{BeginStringFIX43, true, false, true, 1, 1, true},
+		{BeginStringFIX44, true, true, true, 1, 1, true},
+
+		{BeginStringFIX41, false, false, false, 1, 1, false}, //or will not be set
+
+		{BeginStringFIX41, true, false, false, 1, 10, false}, //session seq numbers should be reset at the time of check
+		{BeginStringFIX42, true, false, false, 2, 1, false},
+		{BeginStringFIX43, true, false, false, 14, 100, false},
+	}
+
+	for _, test := range tests {
+		s.session.sessionID.BeginString = test.BeginString
+		s.session.ResetOnLogon = test.ResetOnLogon
+		s.session.ResetOnDisconnect = test.ResetOnDisconnect
+		s.session.ResetOnLogout = test.ResetOnLogout
+
+		s.MockStore.SetNextSenderMsgSeqNum(test.NextSenderMsgSeqNum)
+		s.MockStore.SetNextTargetMsgSeqNum(test.NextTargetMsgSeqNum)
+
+		s.Equal(s.shouldSendReset(), test.Expected)
+	}
 }
 
 func (s *SessionSuite) TestCheckSessionTimeNoStartTimeEndTime() {
@@ -321,7 +407,7 @@ func (s *SessionSuite) TestCheckSessionTimeNotInRange() {
 		s.NextTargetMsgSeqNum(2)
 		if test.expectSendLogout {
 			s.LastToAdminMessageSent()
-			s.MessageType(enum.MsgType_LOGOUT, s.MockApp.lastToAdmin)
+			s.MessageType(string(msgTypeLogout), s.MockApp.lastToAdmin)
 			s.NextSenderMsgSeqNum(3)
 		} else {
 			s.NextSenderMsgSeqNum(2)
@@ -373,7 +459,7 @@ func (s *SessionSuite) TestCheckSessionTimeInRangeButNotSameRangeAsStore() {
 		s.State(latentState{})
 		if test.expectSendLogout {
 			s.LastToAdminMessageSent()
-			s.MessageType(enum.MsgType_LOGOUT, s.MockApp.lastToAdmin)
+			s.MessageType(string(msgTypeLogout), s.MockApp.lastToAdmin)
 			s.FieldEquals(tagMsgSeqNum, 2, s.MockApp.lastToAdmin.Header)
 		}
 		s.ExpectStoreReset()
@@ -534,7 +620,7 @@ func (s *SessionSuite) TestOnAdminConnectInitiateLogon() {
 	s.False(s.sentReset)
 	s.State(logonState{})
 	s.LastToAdminMessageSent()
-	s.MessageType(enum.MsgType_LOGON, s.MockApp.lastToAdmin)
+	s.MessageType(string(msgTypeLogon), s.MockApp.lastToAdmin)
 	s.FieldEquals(tagHeartBtInt, 45, s.MockApp.lastToAdmin.Body)
 	s.FieldEquals(tagMsgSeqNum, 2, s.MockApp.lastToAdmin.Header)
 	s.NextSenderMsgSeqNum(3)
@@ -561,7 +647,7 @@ func (s *SessionSuite) TestInitiateLogonResetSeqNumFlag() {
 	s.True(s.sentReset)
 	s.State(logonState{})
 	s.LastToAdminMessageSent()
-	s.MessageType(enum.MsgType_LOGON, s.MockApp.lastToAdmin)
+	s.MessageType(string(msgTypeLogon), s.MockApp.lastToAdmin)
 	s.FieldEquals(tagMsgSeqNum, 1, s.MockApp.lastToAdmin.Header)
 	s.FieldEquals(tagResetSeqNumFlag, true, s.MockApp.lastToAdmin.Body)
 	s.NextSenderMsgSeqNum(2)
@@ -569,7 +655,7 @@ func (s *SessionSuite) TestInitiateLogonResetSeqNumFlag() {
 }
 
 func (s *SessionSuite) TestOnAdminConnectInitiateLogonFIXT11() {
-	s.session.sessionID.BeginString = string(enum.BeginStringFIXT11)
+	s.session.sessionID.BeginString = string(BeginStringFIXT11)
 	s.session.DefaultApplVerID = "8"
 	s.session.InitiateLogon = true
 
@@ -585,7 +671,7 @@ func (s *SessionSuite) TestOnAdminConnectInitiateLogonFIXT11() {
 	s.True(s.session.InitiateLogon)
 	s.State(logonState{})
 	s.LastToAdminMessageSent()
-	s.MessageType(enum.MsgType_LOGON, s.MockApp.lastToAdmin)
+	s.MessageType(string(msgTypeLogon), s.MockApp.lastToAdmin)
 	s.FieldEquals(tagDefaultApplVerID, "8", s.MockApp.lastToAdmin.Body)
 }
 
@@ -654,6 +740,20 @@ func (s *SessionSuite) TestOnAdminStop() {
 	s.session.onAdmin(stopReq{})
 	s.Disconnected()
 	s.Stopped()
+}
+
+func (s *SessionSuite) TestResetOnDisconnect() {
+	s.IncrNextSenderMsgSeqNum()
+	s.IncrNextTargetMsgSeqNum()
+
+	s.session.ResetOnDisconnect = false
+	s.session.onDisconnect()
+	s.NextSenderMsgSeqNum(2)
+	s.NextTargetMsgSeqNum(2)
+
+	s.session.ResetOnDisconnect = true
+	s.session.onDisconnect()
+	s.ExpectStoreReset()
 }
 
 type SessionSendTestSuite struct {
@@ -792,9 +892,21 @@ func (suite *SessionSendTestSuite) TestSendEnableLastMsgSeqNumProcessed() {
 	suite.FieldEquals(tagLastMsgSeqNumProcessed, 44, suite.MockApp.lastToApp.Header)
 }
 
+func (suite *SessionSendTestSuite) TestSendDisableMessagePersist() {
+	suite.session.State = inSession{}
+	suite.session.DisableMessagePersist = true
+
+	suite.MockApp.On("ToApp").Return(nil)
+	require.Nil(suite.T(), suite.send(suite.NewOrderSingle()))
+	suite.MockApp.AssertExpectations(suite.T())
+	suite.LastToAppMessageSent()
+	suite.NoMessagePersisted(1)
+	suite.NextSenderMsgSeqNum(2)
+}
+
 func (suite *SessionSendTestSuite) TestDropAndSendAdminMessage() {
 	suite.MockApp.On("ToAdmin")
-	suite.Require().Nil(suite.dropAndSend(suite.Heartbeat(), false))
+	suite.Require().Nil(suite.dropAndSend(suite.Heartbeat()))
 	suite.MockApp.AssertExpectations(suite.T())
 
 	suite.MessagePersisted(suite.MockApp.lastToAdmin)
@@ -811,11 +923,11 @@ func (suite *SessionSendTestSuite) TestDropAndSendDropsQueue() {
 	suite.NoMessageSent()
 
 	suite.MockApp.On("ToAdmin")
-	require.Nil(suite.T(), suite.dropAndSend(suite.Logon(), false))
+	require.Nil(suite.T(), suite.dropAndSend(suite.Logon()))
 	suite.MockApp.AssertExpectations(suite.T())
 
 	msg := suite.MockApp.lastToAdmin
-	suite.MessageType(enum.MsgType_LOGON, msg)
+	suite.MessageType(string(msgTypeLogon), msg)
 	suite.FieldEquals(tagMsgSeqNum, 3, msg.Header)
 
 	//only one message sent
@@ -832,11 +944,12 @@ func (suite *SessionSendTestSuite) TestDropAndSendDropsQueueWithReset() {
 	suite.NoMessageSent()
 
 	suite.MockApp.On("ToAdmin")
-	require.Nil(suite.T(), suite.dropAndSend(suite.Logon(), true))
+	suite.MockStore.Reset()
+	require.Nil(suite.T(), suite.dropAndSend(suite.Logon()))
 	suite.MockApp.AssertExpectations(suite.T())
 	msg := suite.MockApp.lastToAdmin
 
-	suite.MessageType(enum.MsgType_LOGON, msg)
+	suite.MessageType(string(msgTypeLogon), msg)
 	suite.FieldEquals(tagMsgSeqNum, 1, msg.Header)
 
 	//only one message sent

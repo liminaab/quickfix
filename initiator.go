@@ -3,7 +3,7 @@ package quickfix
 import (
 	"bufio"
 	"crypto/tls"
-	"net"
+	"golang.org/x/net/proxy"
 	"sync"
 	"time"
 )
@@ -33,9 +33,14 @@ func (i *Initiator) Start() (err error) {
 			return
 		}
 
+		var dialer proxy.Dialer
+		if dialer, err = loadDialerConfig(settings); err != nil {
+			return
+		}
+
 		i.wg.Add(1)
 		go func(sessID SessionID) {
-			i.handleConnection(i.sessions[sessID], tlsConfig)
+			i.handleConnection(i.sessions[sessID], tlsConfig, dialer)
 			i.wg.Done()
 		}(sessionID)
 	}
@@ -45,6 +50,12 @@ func (i *Initiator) Start() (err error) {
 
 //Stop Initiator.
 func (i *Initiator) Stop() {
+	select {
+	case <-i.stopChan:
+		//closed already
+		return
+	default:
+	}
 	close(i.stopChan)
 	i.wg.Wait()
 }
@@ -107,7 +118,7 @@ func (i *Initiator) waitForReconnectInterval(reconnectInterval time.Duration) bo
 	return true
 }
 
-func (i *Initiator) handleConnection(session *session, tlsConfig *tls.Config) {
+func (i *Initiator) handleConnection(session *session, tlsConfig *tls.Config, dialer proxy.Dialer) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -134,27 +145,17 @@ func (i *Initiator) handleConnection(session *session, tlsConfig *tls.Config) {
 		address := session.SocketConnectAddress[connectionAttempt%len(session.SocketConnectAddress)]
 		session.log.OnEventf("Connecting to: %v", address)
 
-		var netConn net.Conn
-		if tlsConfig != nil {
-			tlsConn, err := tls.Dial("tcp", address, tlsConfig)
-			if err != nil {
-				session.log.OnEventf("Failed to connect: %v", err)
-				goto reconnect
-			}
-
-			err = tlsConn.Handshake()
-			if err != nil {
-				session.log.OnEventf("Failed handshake:%v", err)
+		netConn, err := dialer.Dial("tcp", address)
+		if err != nil {
+			session.log.OnEventf("Failed to connect: %v", err)
+			goto reconnect
+		} else if tlsConfig != nil {
+			tlsConn := tls.Client(netConn, tlsConfig)
+			if err = tlsConn.Handshake(); err != nil {
+				session.log.OnEventf("Failed handshake: %v", err)
 				goto reconnect
 			}
 			netConn = tlsConn
-		} else {
-			var err error
-			netConn, err = net.Dial("tcp", address)
-			if err != nil {
-				session.log.OnEventf("Failed to connect: %v", err)
-				goto reconnect
-			}
 		}
 
 		msgIn = make(chan fixIn)

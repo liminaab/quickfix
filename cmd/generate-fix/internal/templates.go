@@ -168,10 +168,10 @@ import(
 
 	"github.com/quickfixgo/quickfix"
 	{{- if checkIfEnumImportRequired .MessageDef}}
-	"github.com/quickfixgo/quickfix/enum"
+	"{{ importRootPath }}/enum"
 	{{- end }}
-	"github.com/quickfixgo/quickfix/field"
-	"github.com/quickfixgo/quickfix/tag"
+	"{{ importRootPath }}/field"
+	"{{ importRootPath }}/tag"
 )
 
 //Header is the {{ .Package }} Header type
@@ -203,10 +203,10 @@ import(
 
 	"github.com/quickfixgo/quickfix"
 	{{- if checkIfEnumImportRequired .MessageDef}}
-	"github.com/quickfixgo/quickfix/enum"
+	"{{ importRootPath }}/enum"
 	{{- end }}
-	"github.com/quickfixgo/quickfix/field"
-	"github.com/quickfixgo/quickfix/tag"
+	"{{ importRootPath }}/field"
+	"{{ importRootPath }}/tag"
 )
 
 //Trailer is the {{ .Package }} Trailer type
@@ -332,12 +332,17 @@ func (f {{ .Name }}Field) Tag() quickfix.Tag { return tag.{{ .Name }} }
 {{ if eq $base_type "FIXUTCTimestamp" }}
 //New{{ .Name }} returns a new {{ .Name }}Field initialized with val
 func New{{ .Name }}(val time.Time) {{ .Name }}Field {
-	return {{ .Name }}Field{ quickfix.FIXUTCTimestamp{ Time: val } }
+	return New{{ .Name }}WithPrecision(val, quickfix.Millis)
 }
 
 //New{{ .Name }}NoMillis returns a new {{ .Name }}Field initialized with val without millisecs
 func New{{ .Name }}NoMillis(val time.Time) {{ .Name }}Field {
-	return {{ .Name }}Field{ quickfix.FIXUTCTimestamp{ Time: val, NoMillis: true } }
+	return New{{ .Name }}WithPrecision(val, quickfix.Seconds)
+}
+
+//New{{ .Name }}WithPrecision returns a new {{ .Name }}Field initialized with val of specified precision
+func New{{ .Name }}WithPrecision(val time.Time, precision quickfix.TimestampPrecision) {{ .Name }}Field {
+	return {{ .Name }}Field{ quickfix.FIXUTCTimestamp{ Time: val, Precision: precision } }
 }
 
 {{ else if and  .Enums (ne $base_type "FIXBoolean") }}

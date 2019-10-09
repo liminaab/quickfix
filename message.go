@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/quickfixgo/quickfix/enum"
+	"github.com/quickfixgo/quickfix/datadictionary"
 )
 
 //Header is first section of a FIX Message
@@ -114,8 +114,34 @@ func NewMessage() *Message {
 	return m
 }
 
+// CopyInto erases the dest messages and copies the curreny message content
+// into it.
+func (m *Message) CopyInto(to *Message) {
+	m.Header.CopyInto(&to.Header.FieldMap)
+	m.Body.CopyInto(&to.Body.FieldMap)
+	m.Trailer.CopyInto(&to.Trailer.FieldMap)
+
+	to.ReceiveTime = m.ReceiveTime
+	to.bodyBytes = make([]byte, len(m.bodyBytes))
+	copy(to.bodyBytes, m.bodyBytes)
+	to.fields = make([]TagValue, len(m.fields))
+	for i := range to.fields {
+		to.fields[i].init(m.fields[i].tag, m.fields[i].value)
+	}
+}
+
 //ParseMessage constructs a Message from a byte slice wrapping a FIX message.
 func ParseMessage(msg *Message, rawMessage *bytes.Buffer) (err error) {
+	return ParseMessageWithDataDictionary(msg, rawMessage, nil, nil)
+}
+
+//ParseMessageWithDataDictionary constructs a Message from a byte slice wrapping a FIX message using an optional session and application DataDictionary for reference.
+func ParseMessageWithDataDictionary(
+	msg *Message,
+	rawMessage *bytes.Buffer,
+	transportDataDictionary *datadictionary.DataDictionary,
+	applicationDataDictionary *datadictionary.DataDictionary,
+) (err error) {
 	msg.Header.Clear()
 	msg.Body.Clear()
 	msg.Trailer.Clear()
@@ -129,6 +155,10 @@ func ParseMessage(msg *Message, rawMessage *bytes.Buffer) (err error) {
 		if b == '\001' {
 			fieldCount++
 		}
+	}
+
+	if fieldCount == 0 {
+		return parseError{OrigError: fmt.Sprintf("No Fields detected in %s", string(rawBytes))}
 	}
 
 	if cap(msg.fields) < fieldCount {
@@ -173,9 +203,9 @@ func ParseMessage(msg *Message, rawMessage *bytes.Buffer) (err error) {
 		}
 
 		switch {
-		case parsedFieldBytes.tag.IsHeader():
+		case isHeaderField(parsedFieldBytes.tag, transportDataDictionary):
 			msg.Header.add(msg.fields[fieldIndex : fieldIndex+1])
-		case parsedFieldBytes.tag.IsTrailer():
+		case isTrailerField(parsedFieldBytes.tag, transportDataDictionary):
 			msg.Trailer.add(msg.fields[fieldIndex : fieldIndex+1])
 		default:
 			foundBody = true
@@ -215,19 +245,42 @@ func ParseMessage(msg *Message, rawMessage *bytes.Buffer) (err error) {
 	}
 
 	return
+
+}
+
+func isHeaderField(tag Tag, dataDict *datadictionary.DataDictionary) bool {
+	if tag.IsHeader() {
+		return true
+	}
+
+	if dataDict == nil {
+		return false
+	}
+
+	_, ok := dataDict.Header.Fields[int(tag)]
+	return ok
+}
+
+func isTrailerField(tag Tag, dataDict *datadictionary.DataDictionary) bool {
+	if tag.IsTrailer() {
+		return true
+	}
+
+	if dataDict == nil {
+		return false
+	}
+
+	_, ok := dataDict.Trailer.Fields[int(tag)]
+	return ok
 }
 
 // MsgType returns MsgType (tag 35) field's value
-func (m *Message) MsgType() (enum.MsgType, MessageRejectError) {
-	s, err := m.Header.GetString(tagMsgType)
-	if err != nil {
-		return enum.MsgType(""), err
-	}
-	return enum.MsgType(s), nil
+func (m *Message) MsgType() (string, MessageRejectError) {
+	return m.Header.GetString(tagMsgType)
 }
 
 // IsMsgTypeOf returns true if the Header contains MsgType (tag 35) field and its value is the specified one.
-func (m *Message) IsMsgTypeOf(msgType enum.MsgType) bool {
+func (m *Message) IsMsgTypeOf(msgType string) bool {
 	if v, err := m.MsgType(); err == nil {
 		return v == msgType
 	}
@@ -263,7 +316,7 @@ func (m *Message) reverseRoute() *Message {
 	//tags added in 4.1
 	var beginString FIXString
 	if m.Header.GetField(tagBeginString, &beginString) == nil {
-		if string(beginString) != enum.BeginStringFIX40 {
+		if string(beginString) != BeginStringFIX40 {
 			copy(tagOnBehalfOfLocationID, tagDeliverToLocationID)
 			copy(tagDeliverToLocationID, tagOnBehalfOfLocationID)
 		}

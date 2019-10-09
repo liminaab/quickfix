@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/quickfixgo/quickfix/config"
-	"github.com/quickfixgo/quickfix/enum"
 	"github.com/quickfixgo/quickfix/internal"
 	"github.com/stretchr/testify/suite"
 )
@@ -42,12 +41,16 @@ func (s *SessionFactorySuite) TestDefaults() {
 	s.False(session.ResetOnLogon)
 	s.False(session.RefreshOnLogon)
 	s.False(session.ResetOnLogout)
+	s.False(session.ResetOnDisconnect)
 	s.Nil(session.SessionTime, "By default, start and end time unset")
 	s.Equal("", session.DefaultApplVerID)
 	s.False(session.InitiateLogon)
 	s.Equal(0, session.ResendRequestChunkSize)
 	s.False(session.EnableLastMsgSeqNumProcessed)
 	s.False(session.SkipCheckLatency)
+	s.Equal(Millis, session.timestampPrecision)
+	s.Equal(120*time.Second, session.MaxLatency)
+	s.False(session.DisableMessagePersist)
 }
 
 func (s *SessionFactorySuite) TestResetOnLogon() {
@@ -98,6 +101,23 @@ func (s *SessionFactorySuite) TestResetOnLogout() {
 		s.NotNil(session)
 
 		s.Equal(test.expected, session.ResetOnLogout)
+	}
+}
+
+func (s *SessionFactorySuite) TestResetOnDisconnect() {
+	var tests = []struct {
+		setting  string
+		expected bool
+	}{{"Y", true}, {"N", false}}
+
+	for _, test := range tests {
+		s.SetupTest()
+		s.SessionSettings.Set(config.ResetOnDisconnect, test.setting)
+		session, err := s.newSession(s.SessionID, s.MessageStoreFactory, s.SessionSettings, s.LogFactory, s.App)
+		s.Nil(err)
+		s.NotNil(session)
+
+		s.Equal(test.expected, session.ResetOnDisconnect)
 	}
 }
 
@@ -293,7 +313,7 @@ func (s *SessionFactorySuite) TestStartOrEndDayParseError() {
 }
 
 func (s *SessionFactorySuite) TestDefaultApplVerID() {
-	s.SessionID = SessionID{BeginString: enum.BeginStringFIXT11, TargetCompID: "TW", SenderCompID: "ISLD"}
+	s.SessionID = SessionID{BeginString: BeginStringFIXT11, TargetCompID: "TW", SenderCompID: "ISLD"}
 
 	var tests = []struct{ expected, config string }{
 		{"2", "2"},
@@ -443,4 +463,65 @@ func (s *SessionFactorySuite) TestConfigureSocketConnectAddressMulti() {
 
 	err = s.configureSocketConnectAddress(session, s.SessionSettings)
 	s.NotNil(err, "must have both host and port to be valid")
+}
+
+func (s *SessionFactorySuite) TestNewSessionTimestampPrecision() {
+	s.SessionSettings.Set(config.TimeStampPrecision, "blah")
+
+	session, err := s.newSession(s.SessionID, s.MessageStoreFactory, s.SessionSettings, s.LogFactory, s.App)
+	s.NotNil(err)
+
+	var tests = []struct {
+		config    string
+		precision TimestampPrecision
+	}{
+		{"SECONDS", Seconds},
+		{"MILLIS", Millis},
+		{"MICROS", Micros},
+		{"NANOS", Nanos},
+	}
+
+	for _, test := range tests {
+		s.SessionSettings.Set(config.TimeStampPrecision, test.config)
+		session, err = s.newSession(s.SessionID, s.MessageStoreFactory, s.SessionSettings, s.LogFactory, s.App)
+		s.Nil(err)
+
+		s.Equal(session.timestampPrecision, test.precision)
+	}
+}
+
+func (s *SessionFactorySuite) TestNewSessionMaxLatency() {
+	s.SessionSettings.Set(config.MaxLatency, "not a number")
+	session, err := s.newSession(s.SessionID, s.MessageStoreFactory, s.SessionSettings, s.LogFactory, s.App)
+	s.NotNil(err, "MaxLatency must be a number")
+
+	s.SessionSettings.Set(config.MaxLatency, "-20")
+	session, err = s.newSession(s.SessionID, s.MessageStoreFactory, s.SessionSettings, s.LogFactory, s.App)
+	s.NotNil(err, "MaxLatency must be positive")
+
+	s.SessionSettings.Set(config.MaxLatency, "0")
+	session, err = s.newSession(s.SessionID, s.MessageStoreFactory, s.SessionSettings, s.LogFactory, s.App)
+	s.NotNil(err, "MaxLatency must be positive")
+
+	s.SessionSettings.Set(config.MaxLatency, "20")
+	session, err = s.newSession(s.SessionID, s.MessageStoreFactory, s.SessionSettings, s.LogFactory, s.App)
+	s.Nil(err)
+	s.Equal(session.MaxLatency, 20*time.Second)
+}
+
+func (s *SessionFactorySuite) TestPersistMessages() {
+	var tests = []struct {
+		setting  string
+		expected bool
+	}{{"Y", false}, {"N", true}}
+
+	for _, test := range tests {
+		s.SetupTest()
+		s.SessionSettings.Set(config.PersistMessages, test.setting)
+		session, err := s.newSession(s.SessionID, s.MessageStoreFactory, s.SessionSettings, s.LogFactory, s.App)
+		s.Nil(err)
+		s.NotNil(session)
+
+		s.Equal(test.expected, session.DisableMessagePersist)
+	}
 }
