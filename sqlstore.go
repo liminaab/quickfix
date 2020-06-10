@@ -148,7 +148,7 @@ func (store *sqlStore) populateCache() (err error) {
 			beginstring, session_qualifier,
 			sendercompid, sendersubid, senderlocid,
 			targetcompid, targetsubid, targetlocid)
-			VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		store.cache.creationTime,
 		store.cache.NextTargetMsgSeqNum(),
 		store.cache.NextSenderMsgSeqNum(),
